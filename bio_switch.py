@@ -15,15 +15,47 @@ import struct
 
 OS_TYPE=sys.platform            # can be 'darwin'
 PROG_NAME = "Bio Relay Controller"
-PROG_VERSION = "0.2"
+PROG_VERSION = "0.3"
 LOG_LINES = 50
 LEFT_PANEL_WIDTH = 500
 BUTTON_SIZE = (150, 20)
 MAX_CHANNEL_N = 8
 QUICK_LOAD_CONFIG_FILE="quick_load.bio_config"
-ABOUT_INFO = """This is a tiny program written for doudou for his bio experiment. Please
-feel free to use it as a tool or for source code study. You can send mail to me
-if you have any feedback or trouble. Thanks.  """
+ABOUT_INFO = """This is a tiny program written for doudou for his bio
+experiment. Please feel free to use it as a tool or for source code study. You
+can send mail to me if you have any feedback or trouble. Thanks.
+
+For signal definition:
+
+in v0.3, "timing" of each channel is enhanced into "signals". Signal is defined
+as:
+
+1. Atomic signal:
+{
+  "length": 20,
+  "state": 1
+}
+This is the basic signal, mean "sleep for 20 seconds, and then set XXX to 1"
+
+2. Combined Signal
+{
+  "sub_signals": [
+    {
+      "length": 10,
+      "state": 0
+    },
+    {
+      "length": 5,
+      "state": 0
+    }
+  ]
+  "cycle": 3
+}
+This is a combined signal, which is composed by 3 atomic signal, and will loop
+for three times.
+
+Combined signals can be nested.
+"""
 # set this if we don't want to really control the relay, but only test the logic
 DEBUG = 1
 
@@ -33,6 +65,157 @@ if OS_TYPE not in DEFAULT_PORT_LIST:
     print "OS type not known: '%s'" % OS_TYPE
     exit (1)
 DEFAULT_PORT = DEFAULT_PORT_LIST[OS_TYPE]
+
+class Signal():
+    """
+    A signal is a so-called signal with a time axis and a value. One signal can
+    be inited in two ways:
+
+    1. atomic signal: "length" and "state" are required. It defines a static
+       signal with state and which holds a specific length.
+    2. combined signal: "sub_signals" is required. "cycle" is optional to
+       describe that how many times the combined signal will be replayed. The
+       default value of "cycle" is set to 1, which is only once.
+
+    attributes for a signal:
+    - config: the hash representation
+    """
+    def __init__ (self, length=-1, state=-1, sub_signals=[], cycle=1):
+        if length != -1 and state != -1:
+            # this is an atomic signal
+            self.__type = "atomic"
+            if type(length) != type(1):
+                self.err("length (%s) should be digital" % length)
+            if length <= 0:
+                self.err("length (%s) should be greater than zero" % length)
+            if type(state) != type(1):
+                self.err("state (%s) should be digital" % state)
+            self.length = length
+            self.state = state
+        elif sub_signals and cycle:
+            # this is a combined signal
+            self.__type = "combined"
+            if type(cycle) != type(1):
+                self.err("cycle (%s) should be digital" % cycle)
+            # each of the sub-signal should be another signal instance
+            for sig in sub_signals:
+                if not isinstance(sig, Signal):
+                    self.err("item '%s' is not Signal" % sig)
+            self.sub_signals = copy.deepcopy(sub_signals)
+            self.cycle = cycle
+        else:
+            self.err("Failed to init Signal instance, param not right")
+
+    def __dumpAtomic (self, start):
+        return [{"length": self.length + start, "state": self.state}]
+
+    def __dumpCombined (self, start):
+        result = []
+        for i in range(self.cycle):
+            for signal in self.sub_signals:
+                result += signal.dump(start)
+                # update the start for next signal
+                start = result[-1]["length"]
+        return result
+
+    def __str__ (self):
+        if self.__type == "atomic":
+            return "<Signal(atomic): length=%s,state=%s>" % \
+                (self.length, self.state)
+        elif self.__type == "combined":
+            result = "<Signal(combined,cycle=%s):\n" % self.cycle
+            for signal in self.sub_signals:
+                sub_result = str(signal)
+                for line in sub_result.split("\n"):
+                    result += "  " + line + "\n"
+            return result.strip() + ">"
+
+    def err (self, s):
+        self.err(s)
+
+    def dump (self, start=0):
+        """Dump this signal into an array that describes the signal. param
+        'start' is the starting timestamp."""
+        if self.__type == "atomic":
+            return self.__dumpAtomic(start)
+        elif self.__type == "combined":
+            return self.__dumpCombined(start)
+        else:
+            self.err("unknown signal type: " + str(__type))
+
+    @staticmethod
+    def parseFromHash (config):
+        """This is a static method for Signal class to generate a Signal
+        instance using an hash like this:
+        {
+            "sub_signals": [
+                {
+                    "length": 20,
+                    "state": 1
+                },
+                {
+                    "length": 10,
+                    "state": 0
+                },
+                {
+                    "length": 15,
+                    "state": 1
+                }
+            ],
+            "cycle": 3
+        }
+        or a simple atomic signal:
+        {
+            "length": 50,
+            "state": 1
+        }
+        or a really complex looped-define signal:
+        {
+            "sub_signals": [
+                {
+                    "sub_signals": [
+                        {
+                            "length": 30,
+                            "state": 0
+                        },
+                        {
+                            "length": 20,
+                            "state": 1
+                        },
+                    ],
+                    "cycle": 2
+                },
+                {
+                    "length": 10,
+                    "state": 0
+                }
+            ],
+            "cycle": 3
+        }
+        """
+        if type(config) != type({}):
+            raise Exception("type of 'config' not right (should be hash)")
+        if "length" in config and "state" in config:
+            # this is a normal atomic signal
+            return Signal(length=config["length"], state=config["state"])
+        elif "sub_signals" in config:
+            # this should be a combined signal
+            if "cycle" in config:
+                cycle = config["cycle"]
+            else:
+                # this is the default
+                cycle = 1
+            sig_list = []
+            sub_signals = config["sub_signals"]
+            if type(sub_signals) != type([]):
+                raise Exception("sub_signals (%s) should be a array like: [...]"\
+                             % sub_signals)
+            for signal in sub_signals:
+                sig = Signal.parseFromHash(signal)
+                sig_list.append(sig)
+            return Signal(sub_signals=sig_list, cycle=cycle)
+        else:
+            raise Exception("we need 'sub_signals/cycle' or 'length/state'")
 
 class RelayController():
     def __init__(self, logger, port, baudrate=9600):
@@ -118,13 +301,19 @@ class WorkingThread(threading.Thread):
         events = []
         for name in channels:
             channel = channels[name]["channel"]
-            total = 0
-            for duration in channels[name]["timing"]:
-                duration["length"] += total
-                total = duration["length"]
-                duration["channel"] = channel
-                duration["name"] = name
-                events.append(duration)
+            # total = 0
+            # for duration in channels[name]["timing"]:
+            #     duration["length"] += total
+            #     total = duration["length"]
+            #     duration["channel"] = channel
+            #     duration["name"] = name
+            #     events.append(duration)
+            signal = channels[name]["signal"]
+            chnl_events = signal.dump()
+            for event in chnl_events:
+                event["channel"] = channel
+                event["name"] = name
+            events += chnl_events
         events.sort(key=lambda x: x["length"])
         return events
 
@@ -141,7 +330,8 @@ class WorkingThread(threading.Thread):
         config = self.config
         # generate the event queue to handle
         events = self.generate_event_queue(config)
-        self.log("thread started with event queue: %s" % events)
+        self.log("thread started with event queue: ")
+        self.log(json.dumps(events, indent=2))
         # this records the running time
         run_time = 0
         while self.state == WorkingThread.STATUS_WORKING:
@@ -259,12 +449,13 @@ class MainWindow (wx.Frame):
         self.portLabel = wx.StaticText(self, -1, "Serial Port: ", style=wx.ALIGN_LEFT)
         self.portConfig = wx.TextCtrl(self, value=DEFAULT_PORT)
         self.buttonLoadConfig = btnLoad = wx.Button(self, -1, "Load Config", size=BUTTON_SIZE)
+        self.buttonCheckConfig = btnCheck = wx.Button(self, -1, "Check Config", size=BUTTON_SIZE)
         self.buttonSaveConfig = btnSave = wx.Button(self, -1, "Save Config", size=BUTTON_SIZE)
         self.buttonStart = btnStart = wx.Button(self, -1, "Start Test", size=BUTTON_SIZE)
         self.buttonStop = btnStop = wx.Button(self, -1, "Stop Test", size=BUTTON_SIZE)
         self.buttonQuit = btnQuit = wx.Button(self, -1, "Quit Program", size=BUTTON_SIZE)
         self.buttonSaveQuick = btnSaveQuick = wx.Button(self, -1, "Save F1-F8 configs", size=BUTTON_SIZE)
-        btnList = [btnLoad, btnSave, btnStart, btnStop, btnQuit]
+        btnList = [btnLoad, btnCheck, btnSave, btnStart, btnStop, btnQuit]
 
         sizerRight.Add(self.portLabel, 0, wx.EXPAND)
         sizerRight.Add(self.portConfig, 0, wx.EXPAND)
@@ -314,6 +505,7 @@ class MainWindow (wx.Frame):
         self.Bind(wx.EVT_MENU, self.OnQuit, quitButton)
         self.Bind(wx.EVT_MENU, self.OnAbout, aboutButton)
         btnLoad.Bind(wx.EVT_BUTTON, self.OnOpen)
+        btnCheck.Bind(wx.EVT_BUTTON, self.OnCheck)
         btnSave.Bind(wx.EVT_BUTTON, self.OnSave)
         btnStart.Bind(wx.EVT_BUTTON, self.OnStart)
         btnStop.Bind(wx.EVT_BUTTON, self.OnStop)
@@ -376,7 +568,9 @@ class MainWindow (wx.Frame):
         file = open(fileName, "w")
         file.write(dataJson)
         file.close()
-        self.ShowMsg("Config data saved to '%s/%s'" % (os.getcwd(), fileName))
+        msg = "Config data saved to '%s/%s'" % (os.getcwd(), fileName)
+        self.ShowMsg(msg)
+        self.Log(msg)
 
     def OnSave(self, e):
         dataHash = self.GetConfig()
@@ -400,13 +594,13 @@ class MainWindow (wx.Frame):
         self.fileName = fileName
         return fileName
 
-    def GetConfig(self):
+    def GetConfig(self, check=False):
         data = self.configArea.GetValue()
-        dataHash = self.ParseConfigData(data)
+        dataHash = self.ParseConfigData(data, check)
         return dataHash
 
     def OnStart (self, e):
-        config = self.GetConfig()
+        config = self.GetConfig(check=True)
         if not config:
             self.ShowMsg("config parse error, please fix config and then start again")
             return
@@ -425,11 +619,15 @@ class MainWindow (wx.Frame):
     def ConvertJson(self, hash):
         return json.dumps(hash, indent=4)
 
-    def ParseConfigData(self, str):
-        dataHash = self.ParseJson(str)
+    def ParseConfigData(self, string, check=False):
+        "set 'check' to do format checking, or just parse JSON"
+        dataHash = self.ParseJson(string)
         if not dataHash:
             self.ShowMsg("Config format not right, please fix")
             return None
+        if not check:
+            # not do more checking
+            return dataHash
         if "description" not in dataHash:
             self.ShowMsg("need 'description' entry!")
             return None
@@ -449,17 +647,17 @@ class MainWindow (wx.Frame):
                 self.ShowMsg("channel '%s' existed more than once!" % index)
                 return None
             index_list.append(index)
-            if "timing" not in value:
-                self.ShowMsg("channel '%s' need key 'timing'")
+            if "signal" not in value:
+                self.ShowMsg("channel '%s' need key 'signal'")
                 return None
-            for item in value["timing"]:
-                for key in ["length", "state"]:
-                    if key not in item:
-                        self.ShowMsg("in item '%s' channel '%s', need '%s'" \
-                                     % (item, chnl, key))
-                        return None
+            signal = value["signal"]
+            try:
+                signal = Signal.parseFromHash(signal)
+            except Exception, e:
+                self.ShowMsg("Failed parse signal: " + str(e))
+                return None
+            value["signal"] = signal
         return dataHash
-        return True
 
     def LoadConfigFile(self, path):
         """Will try to load a config file with name `filename`"""
@@ -471,7 +669,7 @@ class MainWindow (wx.Frame):
             self.ShowMsg("failed to read config file: '%s'" % path)
             return False
         # first try load the data
-        dataHash = self.ParseConfigData(data)
+        dataHash = self.ParseJson(data)
         if not dataHash:
             self.ShowMsg("failed parse config file: '%s'" % fileName)
             return False
@@ -482,6 +680,11 @@ class MainWindow (wx.Frame):
         self.configName.SetValue(self.fileName)
         self.Log("config file (%s) loaded." % self.fileName)
         return True
+
+    def OnCheck (self, e):
+        configHash = self.GetConfig(check=True)
+        if configHash:
+            self.ShowMsg("Config file check passed.")
 
     def OnOpen(self, e):
         dlg = wx.FileDialog(self,
@@ -522,6 +725,7 @@ class MainWindow (wx.Frame):
     def OnQuit(self, e):
         self.Close(True)
 
-app = wx.App(False)
-frame = MainWindow(None, PROG_NAME)
-app.MainLoop()
+if __name__ == "__main__":
+    app = wx.App(False)
+    frame = MainWindow(None, PROG_NAME)
+    app.MainLoop()
