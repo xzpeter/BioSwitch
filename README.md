@@ -12,10 +12,10 @@ Need below libraries before use:
 ChangeLog:
 
 * v0.2:
-** adding shortkeys from F1-F8 to quick load config files and start them
-** adding shortkey F10 to stop a running task
-** adding key to save the F1-F8 quick load config file paths.
+- adding shortkeys from F1-F8 to quick load config files and start them
+- adding shortkey F10 to stop a running task
+- adding key to save the F1-F8 quick load config file paths.
 
 * v0.3:
-** Adding cycling feature to each channel's timing struct. And the cycle
-can be nested (which is called signal, combined signals can be nested).
+- Adding cycling feature to each channel's timing struct. And the cycle
+  can be nested (which is called signal, combined signals can be nested).
